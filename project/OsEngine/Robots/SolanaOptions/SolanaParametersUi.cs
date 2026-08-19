@@ -1,6 +1,6 @@
 /*
  * Красивое окно параметров робота SolanaPutOptionsHedgedRobot.
- * Открывается кнопкой "Bot trade settings" в панели управления роботом.
+ * Открывается кнопкой "Parameters" в панели управления роботом.
  * Особенности:
  * - компактная компоновка в две колонки;
  * - режим робота - тумблер с бегунком и надписью ON/OFF;
@@ -33,15 +33,11 @@ namespace OsEngine.Robots.SolanaOptions
         private ComboBox _futuresSecurityCombo;
         private ComboBox _optionBaseCombo;
         private ComboBox _centralStrikeCombo;
-        private ComboBox _strikeStepCombo;
+        private ComboBox _stepCombo;
         private ComboBox _minDaysCombo;
-        private ComboBox _maxDaysCombo;
         private ComboBox _futuresVolumeCombo;
         private ComboBox _optionLotsCombo;
-        private ComboBox _priceDropCombo;
         private ComboBox _maxStepsCombo;
-        private ComboBox _volumeGrowthModeCombo;
-        private ComboBox _volumeMultiplierCombo;
         private ComboBox _dynamicSelectionCombo;
 
         private int _sectionRows;
@@ -125,77 +121,70 @@ namespace OsEngine.Robots.SolanaOptions
 
             AddSectionHeader(content, "Инструменты", out sectionGrid);
             _futuresSecurityCombo = CreateEditableCombo();
+            Button refreshButton = CreateSmallButton("Обновить", RefreshFuturesList);
+            refreshButton.ToolTip = "Обновить список фьючерсов с сервера (активы, у которых есть опционы).";
             AddParam(sectionGrid, "FuturesSecurityName",
                 "Фьючерс базового актива. Список формируется из активов, у которых есть опционы на бирже. " +
-                "Можно ввести имя вручную (например, BTCUSDT.P).",
+                "Можно ввести имя вручную (например, SOLUSDT.P).",
                 _futuresSecurityCombo,
-                CreateSmallButton("Обновить", RefreshFuturesList));
+                refreshButton);
 
             _optionBaseCombo = CreateEditableCombo("SOL", "BTC", "ETH");
             AddParam(sectionGrid, "OptionBaseAsset",
                 "Базовый актив опционов (подставляется в имя опционного контракта). " +
-                "Автоматически синхронизируется с выбранным фьючерсом.",
+                "Автоматически берётся из имени фьючерса (SOLUSDT.P -> SOL).",
                 _optionBaseCombo);
 
             AddSectionHeader(content, "Опционы", out sectionGrid);
-            _centralStrikeCombo = CreateEditableCombo("0 (авто)", "74", "75", "76", "77", "78", "80");
+            _centralStrikeCombo = CreateEditableCombo(
+                "CS", "CS-1", "CS-2", "CS-3", "CS-4", "CS-5",
+                "CS-6", "CS-7", "CS-8", "CS-9", "CS-10");
             AddParam(sectionGrid, "CentralStrikeOverride",
-                "Центральный страйк вручную. 0 = автоматически: ближайший страйк к текущей цене SOL. " +
-                "Опцион покупается на StrikeStep ниже центрального.",
+                "Страйк первой покупки относительно центрального (ближайший к текущей цене): " +
+                "CS - центральный страйк, CS-1 - на один страйк ниже, CS-2 - на два ниже и т.д. " +
+                "Каждая доливка покупает опцион ещё на один страйк ниже (лестница вниз).",
                 _centralStrikeCombo);
 
-            _strikeStepCombo = CreateEditableCombo("0.5", "1", "1.5", "2", "2.5", "3");
-            AddParam(sectionGrid, "StrikeStep",
-                "На сколько страйков ниже центрального покупается опцион. 1 = на один страйк ниже " +
-                "(например, центральный 75 -> страйк 74).",
-                _strikeStepCombo);
-
-            _minDaysCombo = CreateEditableCombo("0", "1", "2", "3", "4", "5");
+            _minDaysCombo = CreateEditableCombo("0D", "1D", "2D", "2D+", "2D++", "2D+++");
             AddParam(sectionGrid, "OptionMinDaysToExpiry",
-                "Минимальное число дней до экспирации опциона. Для 2-дневных опционов рекомендуется 1.",
+                "Экспирация опциона из списка дат экспирации биржи: " +
+                "0D - истекает в текущие сутки (до экспирации меньше 24 часов), " +
+                "1D - через 1 день (24-48 часов), " +
+                "2D - через 2 дня, " +
+                "2D+ - следующая дата экспирации на бирже после 2D, " +
+                "2D++ - после 2D+, 2D+++ - после 2D++.",
                 _minDaysCombo);
 
-            _maxDaysCombo = CreateEditableCombo("2", "3", "4", "5", "7");
-            AddParam(sectionGrid, "OptionMaxDaysToExpiry",
-                "Максимальное число дней до экспирации. Окно [Min..Max] фильтрует контракты; " +
-                "робот берёт экспирацию, ближайшую к 2 дням.",
-                _maxDaysCombo);
+            AddSectionHeader(content, "Доливка", out sectionGrid);
+            _stepCombo = CreateEditableCombo(
+                "0.01", "0.02", "0.03", "0.04", "0.05", "0.06", "0.07", "0.08", "0.09", "0.1",
+                "0.15", "0.2", "0.25", "0.3", "0.4", "0.5", "0.75", "1", "1.5", "2", "2.5", "3", "4", "5");
+            AddParam(sectionGrid, "StrikeStep",
+                "Шаг доливки в USDT: когда цена фьючерса упадёт на это значение от последнего входа, " +
+                "робот докупит опцион и фьючерс. Список кратен шагу цены инструмента (для SOL 0.01), " +
+                "можно ввести своё значение.",
+                _stepCombo);
+
+            _maxStepsCombo = CreateEditableCombo("1", "2", "3", "4", "5", "6", "8", "10");
+            AddParam(sectionGrid, "MaxSteps",
+                "Максимальное число шагов за цикл: первый вход + доливки. " +
+                "При достижении лимита доливки прекращаются.",
+                _maxStepsCombo);
 
             AddSectionHeader(content, "Объёмы", out sectionGrid);
             _futuresVolumeCombo = CreateEditableCombo("0.1", "0.5", "1", "2", "5", "10");
             AddParam(sectionGrid, "FuturesVolumePerStep",
-                "Сколько фьючерсов покупается за один шаг (первый вход и каждая доливка).",
+                "Начальный объём (количество) опциона и фьючерса, с которого начинается цикл робота. " +
+                "Должен быть равен максимальному из двух минимальных объёмов: минимального объёма фьючерса " +
+                "и минимального объёма опциона в сделке (робот сам поднимет объём до этого минимума).",
                 _futuresVolumeCombo);
 
-            _optionLotsCombo = CreateEditableCombo("0.1", "0.5", "1", "2", "5");
+            _optionLotsCombo = CreateEditableCombo("1", "1.5", "2", "2.5", "3", "4", "5");
             AddParam(sectionGrid, "OptionLotsPerStep",
-                "Сколько опционных контрактов покупается за один шаг. При тейке опционы продаются по FIFO.",
+                "Multiplicator: во сколько раз ордер на покупку больше предыдущего. " +
+                "1 - все входы одним объёмом (Начальный объём); " +
+                "2 - объёмы удваиваются: 1, 2, 4, 8, 16 и т.д.",
                 _optionLotsCombo);
-
-            AddSectionHeader(content, "Доливка", out sectionGrid);
-            _priceDropCombo = CreateEditableCombo("0.5", "1", "1.5", "2", "3", "5");
-            AddParam(sectionGrid, "PriceDropStep",
-                "На сколько USDT должна упасть цена SOL от последнего входа, чтобы робот докупил " +
-                "фьючерс и новый опцион.",
-                _priceDropCombo);
-
-            _maxStepsCombo = CreateEditableCombo("1", "2", "3", "4", "5", "6", "8", "10");
-            AddParam(sectionGrid, "MaxSteps",
-                "Максимальное число шагов за цикл: первый вход + доливки. При достижении лимита доливки прекращаются.",
-                _maxStepsCombo);
-
-            _volumeGrowthModeCombo = CreateEditableCombo("Fixed", "Multiplier");
-            AddParam(sectionGrid, "VolumeGrowthMode",
-                "Fixed - каждая доливка добавляет одинаковый объём (FuturesVolumePerStep и OptionLotsPerStep). " +
-                "Multiplier - каждая следующая доливка добавляет объём, равный текущему суммарному, " +
-                "умноженному на VolumeMultiplier (например, держим 2 фьючерса и 2 опциона, множитель 2 -> " +
-                "добавка 4 фьючерса и 4 опциона, далее 8 и 8 и т.д.).",
-                _volumeGrowthModeCombo);
-
-            _volumeMultiplierCombo = CreateEditableCombo("1", "1.5", "2", "2.5", "3", "4", "5");
-            AddParam(sectionGrid, "VolumeMultiplier",
-                "Множитель объёма для режима Multiplier: объём следующей доливки = текущий суммарный объём x множитель.",
-                _volumeMultiplierCombo);
 
             AddSectionHeader(content, "Дополнительно", out sectionGrid);
             _dynamicSelectionCombo = CreateEditableCombo("True (автоподбор)", "False (вручную)");
@@ -216,9 +205,11 @@ namespace OsEngine.Robots.SolanaOptions
             };
 
             Button applyButton = CreateButton("Применить", _green, 150);
+            applyButton.ToolTip = "Сохранить все параметры робота и закрыть окно.";
             applyButton.Click += (s, e) => ApplyAndClose();
 
             Button closeButton = CreateButton("Закрыть", _gray, 110);
+            closeButton.ToolTip = "Закрыть окно. Изменения не сохраняются.";
             closeButton.Click += (s, e) => Close();
 
             buttons.Children.Add(applyButton);
@@ -605,16 +596,12 @@ namespace OsEngine.Robots.SolanaOptions
 
             _futuresSecurityCombo.Text = GetString("FuturesSecurityName");
             _optionBaseCombo.Text = GetString("OptionBaseAsset");
-            _centralStrikeCombo.Text = GetDecimal("CentralStrikeOverride").ToString(CultureInfo.InvariantCulture);
-            _strikeStepCombo.Text = GetDecimal("StrikeStep").ToString(CultureInfo.InvariantCulture);
-            _minDaysCombo.Text = GetInt("OptionMinDaysToExpiry").ToString();
-            _maxDaysCombo.Text = GetInt("OptionMaxDaysToExpiry").ToString();
+            _centralStrikeCombo.Text = GetString("CentralStrikeOverride");
+            _stepCombo.Text = GetString("StrikeStep");
+            _minDaysCombo.Text = GetString("OptionMinDaysToExpiry");
             _futuresVolumeCombo.Text = GetDecimal("FuturesVolumePerStep").ToString(CultureInfo.InvariantCulture);
             _optionLotsCombo.Text = GetDecimal("OptionLotsPerStep").ToString(CultureInfo.InvariantCulture);
-            _priceDropCombo.Text = GetDecimal("PriceDropStep").ToString(CultureInfo.InvariantCulture);
             _maxStepsCombo.Text = GetInt("MaxSteps").ToString();
-            _volumeGrowthModeCombo.Text = GetString("VolumeGrowthMode");
-            _volumeMultiplierCombo.Text = GetDecimal("VolumeMultiplier").ToString(CultureInfo.InvariantCulture);
             _dynamicSelectionCombo.Text = GetBool("UseDynamicOptionSelection") ? "True (автоподбор)" : "False (вручную)";
         }
 
@@ -645,16 +632,12 @@ namespace OsEngine.Robots.SolanaOptions
                 // Режим уже записан при переключении тумблера
                 SetString("FuturesSecurityName", _futuresSecurityCombo.Text);
                 SetString("OptionBaseAsset", _optionBaseCombo.Text);
-                SetDecimal("CentralStrikeOverride", _centralStrikeCombo.Text);
-                SetDecimal("StrikeStep", _strikeStepCombo.Text);
-                SetInt("OptionMinDaysToExpiry", _minDaysCombo.Text);
-                SetInt("OptionMaxDaysToExpiry", _maxDaysCombo.Text);
+                SetString("CentralStrikeOverride", _centralStrikeCombo.Text);
+                SetString("StrikeStep", _stepCombo.Text);
+                SetString("OptionMinDaysToExpiry", _minDaysCombo.Text);
                 SetDecimal("FuturesVolumePerStep", _futuresVolumeCombo.Text);
                 SetDecimal("OptionLotsPerStep", _optionLotsCombo.Text);
-                SetDecimal("PriceDropStep", _priceDropCombo.Text);
                 SetInt("MaxSteps", _maxStepsCombo.Text);
-                SetString("VolumeGrowthMode", _volumeGrowthModeCombo.Text);
-                SetDecimal("VolumeMultiplier", _volumeMultiplierCombo.Text);
                 SetBool("UseDynamicOptionSelection", _dynamicSelectionCombo.Text);
 
                 _robot.OnParametersAppliedByUi();

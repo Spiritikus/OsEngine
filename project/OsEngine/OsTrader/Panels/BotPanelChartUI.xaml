@@ -43,7 +43,7 @@
                         <Label Name="LabelGeneralSettings" Content="General settings" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="10,6,0,0" FontSize="18"/>
                         <Button Name="ButtonStrategySettings" Content="Position support"  HorizontalAlignment="Left" Margin="66,187,0,0" VerticalAlignment="Top" Width="161" Click="ButtonStrategManualSettings_Click"/>
                         <Button Name="ButtonJournalCommunity" Content="Journal" HorizontalAlignment="Left" Margin="66,68,0,0" VerticalAlignment="Top" Width="161" Click="ButtonJournalCommunity_Click"/>
-                        <Button Name="ButtonStrategyParameter" Content="Parameters"  HorizontalAlignment="Left" Margin="66,127,0,0" VerticalAlignment="Top" Width="161" Click="ButtonStrategParametr_Click" />
+                        <Button Name="ButtonStrategyParameter" Content="Parameters"  HorizontalAlignment="Left" Margin="66,127,0,0" VerticalAlignment="Top" Width="161" Click="ButtonStrategParametr_Click" ToolTip="Открыть окно параметров робота. У роботов с собственным окном настроек открывается именно оно (MyNewBot)."/>
                         <Button Name="ButtonRiskManager" Content="Risk manager" HorizontalAlignment="Left" Margin="66,157,0,0" VerticalAlignment="Top" Width="161" Click="ButtonRiskManager_Click" />
                         <Button Name="ButtonRedactTab" Content="Data settings"  HorizontalAlignment="Left" Margin="66,217,0,0" VerticalAlignment="Top" Width="161" Click="ButtonRedactTab_Click"   />
                         <Button Name="ButtonStrategySettingsIndividual" Content="Bot trade settings" HorizontalAlignment="Left" Margin="66,98,0,0" VerticalAlignment="Top" Width="161" Click="ButtonStrategIndividualSettings_Click" Height="24"/>

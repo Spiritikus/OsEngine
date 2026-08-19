@@ -2,15 +2,20 @@
  * Торговый робот для OsEngine: хеджированный робот на опционах Put и фьючерсах SOL (Bybit)
  *
  * Идея алгоритма:
- * 1) Покупаем опцион Put со страйком на один шаг ниже центрального страйка
- *    (например, центральный = 75 -> страйк опциона = 74) и одновременно 1 фьючерс SOL.
+ * 1) Покупаем опцион Put: страйк = центральный (ближайший к текущей цене) со смещением
+ *    CentralStrikeOverride (CS, CS-1 - на один страйк ниже, CS-2 - на два ниже и т.д.)
+ *    и экспирацией OptionMinDaysToExpiry из списка дат экспирации биржи (0D, 1D, 2D, 2D+, 2D++, 2D+++),
+ *    затем покупаем фьючерс.
  * 2) Выставляем тейк-профит по фьючерсу: цена входа + цена опциона + комиссии входа/выхода.
- * 3) Если цена SOL падает на N USDT (параметр PriceDropStep) - докупаем ещё 1 фьючерс
- *    и новый опцион Put (всегда на один страйк ниже центрального, без дубликатов контрактов).
- * 4) После каждой доливки пересчитываем средний тейк по всему объёму фьючерсов:
+ * 3) Если цена фьючерса падает на Step USDT от последнего входа - докупаем фьючерс
+ *    и опцион ещё на один страйк ниже (лестница вниз).
+ * 4) Объём каждого шага = Начальный объём x Multiplicator^(номер шага): при множителе 1 все входы
+ *    одним объёмом, при 2 - 1, 2, 4, 8, 16 и т.д.
+ * 5) После каждой доливки пересчитываем средний тейк по всему объёму фьючерсов:
  *    TP = AvgEntry + (SumCostOptions + SumCommissions) / FuturesVolume
- * 5) При достижении тейка продаём все опционы по принципу FIFO (от самого первого купленного)
- *    и закрываем весь объём фьючерсов рыночными ордерами.
+ * 6) При достижении тейка продаём опцион Put на страйк выше первого купленного
+ *    (куплен 76 -> продаётся 77) объёмом, равным сумме всех купленных.
+ *    Купленные опционы остаются на бирже (ими распоряжается пользователь).
  */
 
 using OsEngine.Entity;
@@ -22,6 +27,7 @@ using OsEngine.OsTrader.Panels.Attributes;
 using OsEngine.OsTrader.Panels.Tab;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Windows;
@@ -42,38 +48,26 @@ namespace OsEngine.Robots.SolanaOptions
         /// <summary>Название фьючерса SOL на Bybit (линейный перпетуал)</summary>
         private StrategyParameterString _futuresSecurityName;
 
-        /// <summary>Базовый актив опционов (SOL)</summary>
-        private StrategyParameterString _optionBaseAsset;
+        /// <summary>Страйк для продажи опционов при тейке фьючерса: Buy+1 - на один страйк выше первого купленного, Buy - сам первый купленный, Buy-1 - на один ниже</summary>
+        private StrategyParameterString _strikeSell;
 
-        /// <summary>Центральный страйк. 0 = вычислять автоматически (ближайший к текущей цене)</summary>
-        private StrategyParameterDecimal _centralStrikeOverride;
+        /// <summary>Центральный страйк со смещением для первой покупки: CS, CS-1 (на один страйк ниже), CS-2 и т.д.</summary>
+        private StrategyParameterString _centralStrikeOverride;
 
-        /// <summary>Шаг страйка: целевой страйк = центральный - этот шаг (обычно 1 USDT)</summary>
-        private StrategyParameterDecimal _strikeStep;
+        /// <summary>Шаг доливки в USDT: при падении цены фьючерса от последнего входа на это значение докупаем опцион и фьючерс</summary>
+        private StrategyParameterString _step;
 
-        /// <summary>Минимальное число дней до экспирации опциона (2-дневные опционы => 1..3)</summary>
-        private StrategyParameterInt _optionMinDaysToExpiry;
+        /// <summary>Экспирация опциона: 0D - текущие сутки, 1D - через день, 2D - через два, 2D+/2D++/2D+++ - следующие даты в списке экспираций биржи</summary>
+        private StrategyParameterString _optionMinDaysToExpiry;
 
-        /// <summary>Максимальное число дней до экспирации опциона</summary>
-        private StrategyParameterInt _optionMaxDaysToExpiry;
-
-        /// <summary>Объём фьючерса на один шаг (первый вход и доливка)</summary>
+        /// <summary>Начальный объём (количество) опциона и фьючерса, с которого начинается цикл робота</summary>
         private StrategyParameterDecimal _futuresVolumePerStep;
 
-        /// <summary>Количество опционных контрактов на один шаг</summary>
+        /// <summary>Multiplicator: во сколько раз ордер на покупку больше предыдущего (1 - все входы одним объёмом, 2 - 1, 2, 4, 8...)</summary>
         private StrategyParameterDecimal _optionLotsPerStep;
-
-        /// <summary>Шаг доливки: при падении цены на это значение докупаем (1 USDT)</summary>
-        private StrategyParameterDecimal _priceDropStep;
 
         /// <summary>Максимальное число шагов (первый вход + доливки)</summary>
         private StrategyParameterInt _maxSteps;
-
-        /// <summary>Режим роста объёма последующих добавок: Fixed - фиксированный объём, Multiplier - кратно текущему</summary>
-        private StrategyParameterString _volumeGrowthMode;
-
-        /// <summary>Множитель объёма для режима Multiplier</summary>
-        private StrategyParameterDecimal _volumeMultiplier;
 
         /// <summary>Автоматически выбирать целевой опцион. false - использовать инструмент, заданный на вкладке опциона вручную (удобно для тестера)</summary>
         private StrategyParameterBool _useDynamicOptionSelection;
@@ -175,16 +169,16 @@ namespace OsEngine.Robots.SolanaOptions
             _futuresSecurityName = CreateParameter("FuturesSecurityName", "SOLUSDT.P",
                 new[] { "SOLUSDT.P", "BTCUSDT.P", "ETHUSDT.P" });
             _optionBaseAsset = CreateParameter("OptionBaseAsset", "SOL");
-            _centralStrikeOverride = CreateParameter("CentralStrikeOverride", 0m, 0m, 500m, 0.5m);
-            _strikeStep = CreateParameter("StrikeStep", 1m, 0.5m, 10m, 0.5m);
-            _optionMinDaysToExpiry = CreateParameter("OptionMinDaysToExpiry", 1, 0, 7, 1);
-            _optionMaxDaysToExpiry = CreateParameter("OptionMaxDaysToExpiry", 3, 1, 30, 1);
+            _centralStrikeOverride = CreateParameter("CentralStrikeOverride", "CS",
+                new[] { "CS", "CS-1", "CS-2", "CS-3", "CS-4", "CS-5", "CS-6", "CS-7", "CS-8", "CS-9", "CS-10" });
+            _step = CreateParameter("StrikeStep", "1",
+                new[] { "0.01", "0.02", "0.03", "0.04", "0.05", "0.06", "0.07", "0.08", "0.09", "0.1",
+                    "0.15", "0.2", "0.25", "0.3", "0.4", "0.5", "0.75", "1", "1.5", "2", "2.5", "3", "4", "5" });
+            _optionMinDaysToExpiry = CreateParameter("OptionMinDaysToExpiry", "2D",
+                new[] { "0D", "1D", "2D", "2D+", "2D++", "2D+++" });
             _futuresVolumePerStep = CreateParameter("FuturesVolumePerStep", 1m, 0.001m, 100m, 0.001m);
             _optionLotsPerStep = CreateParameter("OptionLotsPerStep", 1m, 0.01m, 100m, 0.01m);
-            _priceDropStep = CreateParameter("PriceDropStep", 1m, 0.5m, 10m, 0.5m);
             _maxSteps = CreateParameter("MaxSteps", 5, 1, 20, 1);
-            _volumeGrowthMode = CreateParameter("VolumeGrowthMode", "Fixed", new[] { "Fixed", "Multiplier" });
-            _volumeMultiplier = CreateParameter("VolumeMultiplier", 2m, 1m, 10m, 0.5m);
             _useDynamicOptionSelection = CreateParameter("UseDynamicOptionSelection", true);
 
             // ---- создаём две вкладки: фьючерс и опцион ----
@@ -357,11 +351,16 @@ namespace OsEngine.Robots.SolanaOptions
 
         /// <summary>
         /// Находит опцион Put для покупки:
-        /// - страйк: на StrikeStep ниже центрального страйка (центральный - вручную или ближайший к цене SOL);
-        /// - экспирация: ближайшая к "2-дневной" в окне [MinDays..MaxDays];
+        /// - страйк: центральный (ближайший к цене) со смещением CentralStrikeOverride
+        ///   (CS - центральный, CS-1 - на один страйк ниже и т.д.);
+        ///   каждая доливка покупает опцион ещё на один страйк ниже (лестница вниз);
+        /// - экспирация: из списка дат экспирации биржи по OptionMinDaysToExpiry
+        ///   (0D - текущие сутки, 1D - через день, 2D - через два, 2D+/2D++/2D+++ - следующие даты в списке);
         /// - исключает уже купленные контракты (защита от дубликатов).
+        /// При докупке (forceTwoDayExpiryOnShortLife) если выбранный опцион истекает менее чем
+        /// через 24 часа - вместо него берётся опцион с экспирацией 2D.
         /// </summary>
-        private Security GetTargetOption()
+        private Security GetTargetOption(bool forceTwoDayExpiryOnShortLife = false)
         {
             try
             {
@@ -373,10 +372,8 @@ namespace OsEngine.Robots.SolanaOptions
 
                 string basePrefix = _optionBaseAsset.ValueString + "-";
                 DateTime now = DateTime.UtcNow;
-                DateTime minExp = now.AddDays(_optionMinDaysToExpiry.ValueInt);
-                DateTime maxExp = now.AddDays(_optionMaxDaysToExpiry.ValueInt);
 
-                // все Put-опционы по базовому активу в нужном окне экспирации
+                // все Put-опционы по базовому активу с будущей экспирацией
                 List<Security> puts = server.Securities
                     .Where(s => s != null
                         && s.SecurityType == SecurityType.Option
@@ -386,8 +383,7 @@ namespace OsEngine.Robots.SolanaOptions
                         && !string.IsNullOrEmpty(s.NameClass)
                         && s.NameClass.EndsWith("_Options")
                         && s.Strike > 0
-                        && s.Expiration >= minExp
-                        && s.Expiration <= maxExp)
+                        && s.Expiration > now)
                     .ToList();
 
                 if (puts.Count == 0)
@@ -395,36 +391,77 @@ namespace OsEngine.Robots.SolanaOptions
                     return null;
                 }
 
-                // --- центральный страйк ---
+                // --- центральный страйк: ближайший к текущей цене ---
                 decimal price = _tabFutures.PriceBestAsk > 0 ? _tabFutures.PriceBestAsk : _lastFuturesFillPrice;
-                decimal centralStrike;
 
-                if (_centralStrikeOverride.ValueDecimal > 0)
-                {
-                    // ручная фиксация центрального страйка
-                    centralStrike = _centralStrikeOverride.ValueDecimal;
-                }
-                else if (price > 0)
-                {
-                    // автоматически: ближайший доступный страйк к текущей цене SOL
-                    centralStrike = puts.MinBy(s => Math.Abs(s.Strike - price)).Strike;
-                }
-                else
+                if (price <= 0)
                 {
                     return null;
                 }
 
-                // --- целевой страйк: на один шаг ниже центрального ---
-                decimal targetStrike = puts.MinBy(s => Math.Abs(s.Strike - (centralStrike - _strikeStep.ValueDecimal))).Strike;
+                decimal centralStrike = puts.MinBy(s => Math.Abs(s.Strike - price)).Strike;
 
-                // --- экспирация: ближайшая к now + 2 дня (2-дневные опционы) ---
+                // --- целевой страйк: центральный - смещение CS-N - номер шага (лестница вниз) ---
+                int offset = GetCentralStrikeOffset();
+                decimal targetStrike = puts
+                    .MinBy(s => Math.Abs(s.Strike - (centralStrike - offset - _stepsDone)))
+                    .Strike;
+
+                // --- целевая экспирация: позиция в списке дат экспирации биржи (0D..2D+++) ---
+                List<DateTime> expiries = puts.Select(s => s.Expiration).Distinct().OrderBy(d => d).ToList();
+
+                if (expiries.Count == 0)
+                {
+                    return null;
+                }
+
+                // 0D - первая экспирация, до которой осталось меньше 24 часов;
+                // если такой нет - берём самую раннюю дату экспирации
+                int baseIndex = 0;
+
+                for (int i = 0; i < expiries.Count; i++)
+                {
+                    if (expiries[i] - now < TimeSpan.FromHours(24))
+                    {
+                        baseIndex = i;
+                        break;
+                    }
+                }
+
+                int bucket = GetExpiryBucketIndex();
+                int expiryIndex = Math.Min(baseIndex + bucket, expiries.Count - 1);
+                DateTime targetExpiry = expiries[expiryIndex];
+
+                // --- кандидаты: нужный страйк и экспирация, ближайшая к целевой ---
                 List<Security> candidates = puts.Where(s => s.Strike == targetStrike).ToList();
-                DateTime idealExpiry = now.AddDays(2);
                 candidates.Sort((a, b) =>
-                    (a.Expiration - idealExpiry).Duration().CompareTo((b.Expiration - idealExpiry).Duration()));
+                    (a.Expiration - targetExpiry).Duration().CompareTo((b.Expiration - targetExpiry).Duration()));
 
                 // --- не покупаем контракт, который уже куплен ---
                 Security target = candidates.FirstOrDefault(s => !_boughtOptions.Any(o => o.SecurityName == s.Name));
+
+                // докупка: выбранный опцион живёт меньше 24 часов - покупаем с экспирацией 2D
+                if (forceTwoDayExpiryOnShortLife && target != null && target.Expiration - now < TimeSpan.FromHours(24))
+                {
+                    string shortLived = target.Name;
+
+                    int twoDayIndex = Math.Min(baseIndex + 2, expiries.Count - 1);
+                    DateTime twoDayExpiry = expiries[twoDayIndex];
+
+                    candidates = puts.Where(s => s.Strike == targetStrike).ToList();
+                    candidates.Sort((a, b) =>
+                        (a.Expiration - twoDayExpiry).Duration().CompareTo((b.Expiration - twoDayExpiry).Duration()));
+
+                    target = candidates.FirstOrDefault(s => !_boughtOptions.Any(o => o.SecurityName == s.Name));
+
+                    if (target != null)
+                    {
+                        SendNewLogMessage(
+                            "Опцион " + shortLived + " истекает менее чем через 24 часа. " +
+                            "Докупаем с экспирацией 2D: " + target.Name,
+                            LogMessageType.System);
+                    }
+                }
 
                 return target;
             }
@@ -433,6 +470,65 @@ namespace OsEngine.Robots.SolanaOptions
                 SendNewLogMessage(error.ToString(), LogMessageType.Error);
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Смещение страйка из CentralStrikeOverride: CS -> 0, CS-1 -> 1, CS-2 -> 2 и т.д.
+        /// </summary>
+        private int GetCentralStrikeOffset()
+        {
+            string value = _centralStrikeOverride.ValueString;
+
+            if (string.IsNullOrEmpty(value) || value.Trim().Equals("CS", StringComparison.OrdinalIgnoreCase))
+            {
+                return 0;
+            }
+
+            string numberPart = value.Trim().Substring(2); // "CS-2" -> "2"
+
+            int offset = 0;
+            int.TryParse(numberPart, out offset);
+
+            return Math.Max(0, offset);
+        }
+
+        /// <summary>
+        /// Позиция экспирации в списке дат биржи по OptionMinDaysToExpiry:
+        /// 0D -> 0, 1D -> 1, 2D -> 2, 2D+ -> 3, 2D++ -> 4, 2D+++ -> 5.
+        /// </summary>
+        private int GetExpiryBucketIndex()
+        {
+            switch (_optionMinDaysToExpiry.ValueString)
+            {
+                case "0D":
+                    return 0;
+                case "1D":
+                    return 1;
+                case "2D+":
+                    return 3;
+                case "2D++":
+                    return 4;
+                case "2D+++":
+                    return 5;
+                default: // "2D" и любое другое значение
+                    return 2;
+            }
+        }
+
+        /// <summary>
+        /// Шаг доливки в USDT (параметр Step): падение цены фьючерса от последнего входа,
+        /// при котором докупается опцион и фьючерс.
+        /// </summary>
+        private decimal GetStepValue()
+        {
+            decimal step = 1m;
+
+            if (decimal.TryParse(_step.ValueString, NumberStyles.Float, CultureInfo.InvariantCulture, out step) == false)
+            {
+                decimal.TryParse(_step.ValueString, NumberStyles.Float, CultureInfo.CurrentCulture, out step);
+            }
+
+            return step > 0 ? step : 1m;
         }
 
         /// <summary>
@@ -545,24 +641,6 @@ namespace OsEngine.Robots.SolanaOptions
         }
 
         /// <summary>
-        /// Комиссия по ноционалу (для оценок выхода опционов).
-        /// </summary>
-        private decimal CalcCommissionOnNotional(BotTabSimple tab, decimal notional)
-        {
-            if (tab == null || tab.Connector == null || notional <= 0)
-            {
-                return 0;
-            }
-
-            if (tab.Connector.CommissionType == CommissionType.Percent)
-            {
-                return notional * tab.Connector.CommissionValue / 100m;
-            }
-
-            return 0;
-        }
-
-        /// <summary>
         /// Сумма комиссий по закрывающим сделкам позиции (использует фактические цены ордеров).
         /// </summary>
         private decimal CalcCommissionOnCloseOrders(BotTabSimple tab, Position position)
@@ -643,9 +721,11 @@ namespace OsEngine.Robots.SolanaOptions
             decimal paidCommissions = _futuresBuyCommission + _futuresCloseCommission
                                     + _optionsBuyCommission + _optionsCloseCommission;
 
-            // расчётные комиссии на оставшийся выход: фьючерс по текущему объёму + опционы по их стоимости
+            // расчётные комиссии на оставшийся выход: фьючерс по текущему объёму + опцион по факту его продажи.
+            // Комиссия по продаже опциона при выходе оценивается как комиссия по его покупке:
+            // удвоение учитывает и вход, и выход (покупаем опционы, на тейке продаём опцион следующего страйка).
             decimal exitCommissions = CalcCommission(_tabFutures, exitPrice, futuresVolume);
-            exitCommissions += CalcCommissionOnNotional(_tabOptions, _totalOptionCost);
+            exitCommissions += _optionsBuyCommission;
 
             decimal totalCommissions = paidCommissions + exitCommissions;
 
@@ -1040,7 +1120,9 @@ namespace OsEngine.Robots.SolanaOptions
             // --- выбор целевого опциона ---
             if (_useDynamicOptionSelection.ValueBool)
             {
-                Security target = GetTargetOption();
+                // докупки: если выбранный опцион живёт меньше 24 часов - берём экспирацию 2D.
+                // Для первого входа (FirstEntry) такое замещение не применяется.
+                Security target = GetTargetOption(signalType == "AddStep");
                 if (target == null)
                 {
                     LogNoOptionWarning();
@@ -1139,55 +1221,43 @@ namespace OsEngine.Robots.SolanaOptions
         }
 
         /// <summary>
-        /// Объём фьючерса для текущего шага (первый вход или доливка).
-        /// Fixed - фиксированный объём FuturesVolumePerStep.
-        /// Multiplier - объём, равный текущему суммарному объёму позиции, умноженному на множитель
-        /// (первый вход - базовый объём).
+        /// Базовый объём (Начальный объём): не меньше максимального из минимальных объёмов
+        /// фьючерса и опциона в сделке.
         /// </summary>
-        private decimal GetFuturesVolumeForStep()
+        private decimal GetBaseVolume()
         {
-            if (_volumeGrowthMode.ValueString == "Multiplier")
-            {
-                decimal current = _tabFutures.VolumeNet;
+            decimal minFutures = _tabFutures.Security != null ? _tabFutures.Security.MinTradeAmount : 0;
+            decimal minOption = _tabOptions.Security != null ? _tabOptions.Security.MinTradeAmount : 0;
 
-                if (current > 0)
-                {
-                    decimal mult = _volumeMultiplier.ValueDecimal > 0 ? _volumeMultiplier.ValueDecimal : 1;
-                    return current * mult;
-                }
-            }
+            decimal min = Math.Max(minFutures, minOption);
+            decimal initial = _futuresVolumePerStep.ValueDecimal;
 
-            return _futuresVolumePerStep.ValueDecimal;
+            return initial > min ? initial : min;
         }
 
         /// <summary>
-        /// Объём опционов для текущего шага (первый вход или доливка).
-        /// Fixed - фиксированный объём OptionLotsPerStep.
-        /// Multiplier - объём, равный суммарному объёму купленных опционов, умноженному на множитель
-        /// (первый вход - базовый объём).
+        /// Объём фьючерса для текущего шага:
+        /// Начальный объём x Multiplicator^(номер шага).
+        /// Multiplicator = 1 - все входы одним объёмом, 2 - 1, 2, 4, 8, 16 и т.д.
+        /// </summary>
+        private decimal GetFuturesVolumeForStep()
+        {
+            decimal multiplier = _optionLotsPerStep.ValueDecimal >= 1 ? _optionLotsPerStep.ValueDecimal : 1;
+            decimal volume = GetBaseVolume() * (decimal)Math.Pow((double)multiplier, _stepsDone);
+
+            return volume;
+        }
+
+        /// <summary>
+        /// Объём опционов для текущего шага:
+        /// Начальный объём x Multiplicator^(номер шага).
         /// </summary>
         private decimal GetOptionVolumeForStep()
         {
-            if (_volumeGrowthMode.ValueString == "Multiplier")
-            {
-                decimal current = 0;
+            decimal multiplier = _optionLotsPerStep.ValueDecimal >= 1 ? _optionLotsPerStep.ValueDecimal : 1;
+            decimal volume = GetBaseVolume() * (decimal)Math.Pow((double)multiplier, _stepsDone);
 
-                for (int i = 0; i < _boughtOptions.Count; i++)
-                {
-                    if (_boughtOptions[i].Position != null)
-                    {
-                        current += _boughtOptions[i].Position.OpenVolume;
-                    }
-                }
-
-                if (current > 0)
-                {
-                    decimal mult = _volumeMultiplier.ValueDecimal > 0 ? _volumeMultiplier.ValueDecimal : 1;
-                    return current * mult;
-                }
-            }
-
-            return _optionLotsPerStep.ValueDecimal;
+            return volume;
         }
 
         /// <summary>
@@ -1282,8 +1352,8 @@ namespace OsEngine.Robots.SolanaOptions
                 {
                     _lastExitQuoteLogTime = DateTime.UtcNow;
                     SendNewLogMessage(
-                        "Не найден опцион Put на страйк " + (firstSecurity.Strike + _strikeStep.ValueDecimal) +
-                        " (следующий от купленного " + firstSecurity.Strike + "). Закройте позиции вручную.",
+                        "Не найден опцион Put на страйк выше купленного " + firstSecurity.Strike +
+                        ". Закройте позиции вручную.",
                         LogMessageType.Error);
                 }
                 return;
@@ -1331,8 +1401,8 @@ namespace OsEngine.Robots.SolanaOptions
         }
 
         /// <summary>
-        /// Целевой опцион для продажи при выходе: Put на страйк выше первого купленного,
-        /// экспирация - ближайшая к экспирации первого купленного.
+        /// Целевой опцион для продажи при выходе: Put на следующий страйк выше первого купленного
+        /// (по сетке страйков биржи), экспирация - ближайшая к экспирации первого купленного.
         /// </summary>
         private Security GetExitSellOption(Security firstBought)
         {
@@ -1344,14 +1414,13 @@ namespace OsEngine.Robots.SolanaOptions
                     return null;
                 }
 
-                decimal sellStrike = firstBought.Strike + _strikeStep.ValueDecimal;
-
+                // следующий страйк выше купленного по сетке страйков биржи
                 List<Security> candidates = server.Securities
                     .Where(s => s != null
                         && s.SecurityType == SecurityType.Option
                         && s.OptionType == OptionType.Put
                         && s.NameClass == firstBought.NameClass
-                        && s.Strike == sellStrike)
+                        && s.Strike > firstBought.Strike)
                     .ToList();
 
                 if (candidates.Count == 0)
@@ -1360,8 +1429,17 @@ namespace OsEngine.Robots.SolanaOptions
                 }
 
                 candidates.Sort((a, b) =>
-                    (a.Expiration - firstBought.Expiration).Duration()
-                    .CompareTo((b.Expiration - firstBought.Expiration).Duration()));
+                {
+                    int byStrike = a.Strike.CompareTo(b.Strike);
+
+                    if (byStrike != 0)
+                    {
+                        return byStrike;
+                    }
+
+                    return (a.Expiration - firstBought.Expiration).Duration()
+                        .CompareTo((b.Expiration - firstBought.Expiration).Duration());
+                });
 
                 return candidates[0];
             }
@@ -1503,16 +1581,16 @@ namespace OsEngine.Robots.SolanaOptions
                         EnsureTakeProfitOrder();
                     }
 
-                    // 4) доливка: цена упала на PriceDropStep от последнего входа
+                    // 4) доливка: цена упала на Step от последнего входа
                     if (_lastFuturesFillPrice > 0
-                        && price <= _lastFuturesFillPrice - _priceDropStep.ValueDecimal
+                        && price <= _lastFuturesFillPrice - GetStepValue()
                         && !noFuturesPosition
                         && _futuresBuysPending <= 0
                         && _optionBuysPending <= 0
                         && _stepsDone < _maxSteps.ValueInt)
                     {
                         SendNewLogMessage(
-                            "Цена " + price.ToString("F2") + " упала на " + _priceDropStep.ValueDecimal +
+                            "Цена " + price.ToString("F2") + " упала на " + GetStepValue() +
                             " от входа " + _lastFuturesFillPrice.ToString("F2") + ". Доливка №" + (_stepsDone + 1),
                             LogMessageType.System);
 
@@ -1890,15 +1968,11 @@ namespace OsEngine.Robots.SolanaOptions
                 ["FuturesSecurityName"] = _futuresSecurityName,
                 ["OptionBaseAsset"] = _optionBaseAsset,
                 ["CentralStrikeOverride"] = _centralStrikeOverride,
-                ["StrikeStep"] = _strikeStep,
+                ["StrikeStep"] = _step,
                 ["OptionMinDaysToExpiry"] = _optionMinDaysToExpiry,
-                ["OptionMaxDaysToExpiry"] = _optionMaxDaysToExpiry,
                 ["FuturesVolumePerStep"] = _futuresVolumePerStep,
                 ["OptionLotsPerStep"] = _optionLotsPerStep,
-                ["PriceDropStep"] = _priceDropStep,
                 ["MaxSteps"] = _maxSteps,
-                ["VolumeGrowthMode"] = _volumeGrowthMode,
-                ["VolumeMultiplier"] = _volumeMultiplier,
                 ["UseDynamicOptionSelection"] = _useDynamicOptionSelection
             };
         }
