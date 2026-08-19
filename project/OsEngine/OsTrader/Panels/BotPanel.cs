@@ -2503,6 +2503,12 @@ position => position.State != PositionStateType.OpeningFail
         /// </summary>
         public virtual void ShowIndividualSettingsDialog() { }
 
+        /// <summary>
+        /// true - the robot has its own settings window (ShowIndividualSettingsDialog),
+        /// the standard "Parameters" button opens it instead of the default window
+        /// </summary>
+        public virtual bool HasCustomSettingsDialog => false;
+
         #endregion
 
         #region Global position reaction

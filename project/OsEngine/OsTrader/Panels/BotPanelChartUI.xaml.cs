@@ -37,6 +37,12 @@ namespace OsEngine.OsTrader.Panels
             StartPaint();
             Local();
 
+            // у роботов с собственным окном настроек остаётся одна кнопка "Parameters"
+            if (panel.HasCustomSettingsDialog)
+            {
+                ButtonStrategySettingsIndividual.Visibility = Visibility.Collapsed;
+            }
+
             Closed += BotPanelChartUi_Closed;
 
             if (panel.StartProgram == StartProgram.IsTester)
@@ -687,6 +693,12 @@ namespace OsEngine.OsTrader.Panels
         {
             try
             {
+                if (_panel.HasCustomSettingsDialog)
+                {
+                    _panel.ShowIndividualSettingsDialog();
+                    return;
+                }
+
                 _panel.ShowParameterDialog();
             }
             catch (Exception ex)
